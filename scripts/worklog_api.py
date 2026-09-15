@@ -30,10 +30,10 @@ SHA256 再 base64。应用密钥的 sign 就是那个值本身。）
     add-row        向工作日志表新增一条记录（员工、项目均为必填）
     delete-row     从工作日志表删除一条记录（撤回误写/清理测试数据）
 
-项目经理自动带出：
-    add-row 解析出项目后会反查项目档案，把「项目经理」关联记录（sid=员工 rowid）
-    填入工作日志的「项目经理」字段，「项目经理（内部）」成员的 accountId 填入
-    「项目经理用户」字段。项目没配置经理则跳过；--no-pm 可单次关闭。
+项目经理带出（默认关闭）：
+    2026-09-14 起默认不写「项目经理/项目经理用户」。原因：本部署有自动化会把日志的
+    「员工」改写成项目经理值，疑似与写入项目经理字段相关。需要时加 --pm 单次开启，
+    或在 config.json 设 "autofill_pm": true；--no-pm 可单次强制关闭。
 
 用法示例：
     python worklog_api.py --config config.json test-auth
@@ -406,12 +406,17 @@ def cmd_add_row(args: argparse.Namespace) -> int:
     if owner_id:
         controls.append({"controlId": "ownerid", "value": owner_id})
 
-    # 项目经理（自动带出）：按项目 rowid 反查项目档案，填「项目经理」+「项目经理用户」。
-    # 项目未配置经理/接口失败时静默跳过，不阻断写日志。--no-pm 可单次关闭。
+    # 项目经理带出：默认关闭（2026-09-14）。本部署有自动化会把日志「员工」改写成
+    # 项目经理值，疑似与写入项目经理字段相关；需要时 --pm 单次开启或 config autofill_pm=true。
     pm_note = ""
     pm_rowids: list[str] = []
     pm_accounts: list[str] = []
-    if not args.no_pm:
+    pm_enabled = bool(cfg.get("autofill_pm", False))
+    if args.pm:
+        pm_enabled = True
+    if args.no_pm:
+        pm_enabled = False
+    if pm_enabled:
         pm_control = cfg.get("worklog_pm_control_id", "")
         pm_user_control = cfg.get("worklog_pm_user_control_id", "")
         if pm_control or pm_user_control:
@@ -431,9 +436,13 @@ def cmd_add_row(args: argparse.Namespace) -> int:
                          triggerWorkflow=not args.no_workflow)
 
     if args.dry_run:
+        # 脱敏后再打印：appKey/sign 属于凭证，绝不能进终端/对话
+        masked = json.loads(json.dumps(payload))
+        masked["sign"] = "***（已脱敏）***"
+        masked["appKey"] = str(masked.get("appKey", ""))[:4] + "****"
         print("DRY-RUN（未真正发送）：")
         print(json.dumps({
-            "url": url, "payload": payload,
+            "url": url, "payload": masked,
             "_employee_source": employee_source,
             "_project_source": project_source,
             "_owner_source": owner_source,
@@ -452,7 +461,8 @@ def cmd_add_row(args: argparse.Namespace) -> int:
     print(json.dumps(resp, ensure_ascii=False, indent=2))
     if ok:
         owner_hint = f"，owner 来自{owner_source}={owner_id}" if owner_id else "（未设置 ownerid）"
-        pm_hint = f" | 项目经理={'/'.join(pm_rowids) or pm_note or '无'}" if not args.no_pm else " | 项目经理=未启用"
+        pm_hint = (f" | 项目经理={'/'.join(pm_rowids) or pm_note or '无'}"
+                   if pm_enabled else " | 项目经理=未带出（默认关闭）")
         print(f"\n✓ 写入成功 rowid={resp.get('data')}", file=sys.stderr)
         print(f"  员工={employee_source} | 项目={project_source}{pm_hint}{owner_hint}", file=sys.stderr)
     else:
@@ -507,7 +517,8 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument("--hours", type=float, default=None, help="工时（数字）")
     p_add.add_argument("--shift", default=None, help="时段：全天/上午/下午/其它")
     p_add.add_argument("--owner-account-id", default=None, help="拥有者（HAP accountId）。不传则取 config.json 的 default_owner_account_id；都没有则按员工档案自动查")
-    p_add.add_argument("--no-pm", action="store_true", help="不自动带出项目经理（默认按项目档案自动带出）")
+    p_add.add_argument("--no-pm", action="store_true", help="不自动带出项目经理（单次强制关闭）")
+    p_add.add_argument("--pm", action="store_true", help="自动带出项目经理（单次开启；默认关闭）")
     p_add.add_argument("--no-workflow", action="store_true", help="不触发工作流")
     p_add.add_argument("--dry-run", action="store_true", help="只打印请求体，不发送")
 
